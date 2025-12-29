@@ -57,33 +57,79 @@ try:
         return w
 
     final_params['Weight'] = final_params.apply(adjust_weight, axis=1)
-
-    # Familie bepalen
-    def get_family_by_type(name):
-        if any(x in name for x in ['Trend_200', 'MACD', 'ADX', 'SAR', 'Mom', 'MADist']): return 1
-        if any(x in name for x in ['RSI', 'Stoch', 'CCI', 'WPR', 'MFI', 'OsMA', 'DeM', 'RVI']): return 0
-        # TOEVOEGING: 'BB' en 'Width' zodat Bollinger Bands meedoen
-        if any(x in name for x in ['OBV', 'AD', 'Force', 'BullP', 'BearP', 'StdDev', 'BBW']): return 2
-        return 3
-
-    
-    final_params['Family'] = final_params['Name'].apply(get_family_by_type)
     
     # Selecteer Top 5 per familie (Echt 15 stuks)
     top_osc   = final_params[final_params['Family'] == 0].sort_values('Weight', ascending=False).head(5)
     top_trend = final_params[final_params['Family'] == 1].sort_values('Weight', ascending=False).head(5)
     top_vol   = final_params[final_params['Family'] == 2].sort_values('Weight', ascending=False).head(5)
-    
+
+
     diverse_top_15 = pd.concat([top_osc, top_trend, top_vol])
+
+    # Filter alles wat NIET in de top 15 zit
+    selected_names = diverse_top_15['Name'].tolist()
+    rejected = final_params[~final_params['Name'].isin(selected_names)].sort_values('Weight', ascending=False)
+    
+    print("\n" + "="*50)
+    print(f"--- AFGEWEZEN INDICATOREN (Totaal: {len(rejected)}) ---")
+    print("="*50)
+    
+    # Forceer pandas om ALLE rijen te tonen (geen "..." afkapping)
+    pd.set_option('display.max_rows', None)
+    
+    # Print de lijst netjes
+    print(rejected[['Name', 'Family', 'Weight', 'Family']].to_string(index=False))
+    
+    # Reset de weergave-instelling voor het geval je hierna nog iets anders print
+    pd.reset_option('display.max_rows')
+    
+    print("="*50 + "\n")
+    
+    # Normaliseer gewichten
     diverse_top_15['Weight'] = diverse_top_15['Weight'] / diverse_top_15['Weight'].sum()
     
-    # EXPORTEER ALLEEN DEZE 15 (Verwijder alle andere export regels onderaan!)
-    output_columns = ['ID', 'Weight', 'Mean', 'StdDev', 'Direction', 'Name']
+# --- NIEUW: Bereken Threshold voor 5% trades ---
+    print("Berekenen van thresholdwaarde...")
+    
+    # Initialiseer score array voor alle trainingsdata
+    scores = np.zeros(len(train_df))
+    
+    # Loop alleen over de gekozen 15 indicatoren om de geaggregeerde score te bouwen
+    for idx, row in diverse_top_15.iterrows():
+        col_name = row['Name']
+        if col_name in train_df.columns:
+            # Haal waarden op
+            values = train_df[col_name].values
+            
+            # Parameters
+            w = row['Weight']
+            d = row['Direction']
+            m = row['Mean']
+            s = row['StdDev']
+            if s == 0: s = 1 # Voorkom deling door nul
+            
+            # Bereken weighted Z-score bijdrage
+            z_score = (values - m) / s
+            scores += (z_score * w * d)
+
+    # Bepaal de threshold waarde (95e percentiel = top 5%)
+    # Gebruik absolute waarden als trades beide kanten op kunnen, 
+    # of percentiel 95 als het om directionele score gaat. 
+    # Hier gaan we uit van de 'Long' trigger (95th percentile) als generieke threshold.
+    calculated_threshold = np.percentile(scores, 95)
+    
+    print(f"Berekende Threshold (95%): {calculated_threshold:.5f}")
+    
+    # Voeg threshold toe aan dataframe (dezelfde waarde voor elke regel)
+    diverse_top_15['Threshold'] = calculated_threshold
+    
+    # EXPORTEER
+    output_columns = ['ID', 'Name', 'Weight', 'Mean', 'StdDev', 'Direction', 'Threshold']
     diverse_top_15[output_columns].to_csv(tester_files_path + "JJ_Scoring_Params.csv", sep=';', index=False)
     
-    print(f"✅ SUCCES: Alleen de 15 top-indicatoren zijn opgeslagen in {tester_files_path}JJ_Scoring_Params.csv")
+    print(f"✅ SUCCES: Alleen de 15 top-indicatoren + Threshold zijn opgeslagen in {tester_files_path}JJ_Scoring_Params.csv")
     
-    print(diverse_top_15[['ID', 'Name', 'Weight']])
+    print(diverse_top_15[['ID', 'Name', 'Weight', 'Family']])
 
 except Exception as e:
     print(f"Er ging iets mis: {e}")

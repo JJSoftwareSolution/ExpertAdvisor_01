@@ -29,6 +29,7 @@ build/
 *.csv
 !JJ_Scoring_Params.csv
 !JJ_Auto_Config.csv
+!JJ_Trigger_Config.csv
 
 # IDE
 .vscode/

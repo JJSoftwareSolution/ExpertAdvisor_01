@@ -65,3 +65,12 @@ ________________________________________
 6.	Handel: Pas deze regels real-time toe, bereken de waarschijnlijkheidsscore, en voer uit.
 7.	Herhaal: Als de markt verandert, voer stap 1 t/m 5 opnieuw uit om het systeem te "herscholen".
 
+## ⚙️ Operationele Workflow & Strategie
+
+Dit systeem is ontworpen als een **semi-automatisch (hybride) systeem**. Hoewel het op een laag timeframe draait, ligt de focus op structurele trades en niet op snelle scalping.
+
+* **Handels-Timeframe:** De EA wordt uitgevoerd op de **M5-grafiek**.
+* **Geen Scalper:** Ondanks de M5-chart is dit *geen* scalping-strategie. De besluitvorming is fundamenteel gebaseerd op de grotere trend.
+* **Multi-Timeframe Analyse:** Het algoritme valideert signalen door indicatoren van hogere timeframes (**H4, H1 en M30**) mee te wegen in de consensus.
+* **Trainingscyclus:** Het model wordt periodiek (bijv. wekelijks) opnieuw getraind om aan te sluiten op veranderende marktomstandigheden.
+* **Uitvoering:** Het proces is handmatig. De gebruiker start zelf de export-scripts in MT4 en de analyse-scripts in Python; er is geen complexe real-time koppeling vereist.
