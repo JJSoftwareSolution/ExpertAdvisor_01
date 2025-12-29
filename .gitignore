@@ -3,6 +3,40 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+
+# MT4 specifiek
+*.ex4
+*.ex5
+*.log
+*.dat
+*.hst
+*.fxt
+*.tpl
+*.chr
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Data files (behalve configs)
+*.csv
+!JJ_Scoring_Params.csv
+!JJ_Auto_Config.csv
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln
+
 # User-specific files
 *.rsuser
 *.suo
