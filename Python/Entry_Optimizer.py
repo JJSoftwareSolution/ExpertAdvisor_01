@@ -18,7 +18,6 @@ stats_file  = mt4_files_path + f"Indicator_Stats_{symbol}.csv"
 config_file = tester_files_path + "JJ_Trigger_Config.csv"
 
 print(f"--- START INSTAP OPTIMALISATIE: {symbol} ---")
-print("Doel: Zoek het beste filter uit MQL4 data om drawdown te verlagen.")
 
 try:
     # ==============================================================================
@@ -43,12 +42,24 @@ try:
     if not os.path.exists(params_file):
         raise FileNotFoundError(f"Params file niet gevonden: {params_file}. Draai eerst Market Analyzer.")
         
-    params_df = pd.read_csv(params_file, sep=';').set_index('Name')
+    # Eerst inlezen zonder index om Threshold te pakken
+    params_raw = pd.read_csv(params_file, sep=';')
+    
+    # --- NIEUW: THRESHOLD OPHALEN ---
+    dynamic_threshold = 0.0
+    if 'Threshold' in params_raw.columns:
+        dynamic_threshold = params_raw['Threshold'].iloc[0]
+        print(f"✅ Threshold gevonden in CSV: {dynamic_threshold:.5f}")
+    else:
+        print("⚠️ Geen Threshold kolom gevonden! Fallback naar 0.7")
+        dynamic_threshold = 0.7
+        
+    params_df = params_raw.set_index('Name')
 
     # ==============================================================================
     # 2. SCORE RECONSTRUCTIE (Simulatie van de EA)
     # ==============================================================================
-    print("2. EA Score simuleren...")
+    print("2. EA Score simuleren (Exacte EA logica)...")
     df['AI_Score'] = 0.0
 
     for name, row in params_df.iterrows():
@@ -61,28 +72,23 @@ try:
         direction = row['Direction']
         
         if std == 0: continue
-        z_score = (df[name] - mean) / std
-        z_score = z_score.clip(-3, 3)
+        
+        # Z-Score berekening
+        z_score = (df[name] - mean) / std 
         
         df['AI_Score'] += z_score * direction * weight
-        
-     # --- DE CORRECTIE: SCALING FACTOR TOEPASSEN ---
-    # Net als in de EA vermenigvuldigen we de score met 5.
-    # Hierdoor wordt 0.16 -> 0.80 en wordt de threshold van 0.7 gehaald.
-    df['AI_Score'] *= 10.0 
-    # ----------------------------------------------
 
     # ==============================================================================
     # 3. FILTER OP POTENTIËLE TRADES
     # ==============================================================================
-    threshold = 0.7
-    opportunities = df[df['AI_Score'] >= threshold].copy()
+    # Gebruik de dynamische threshold uit de CSV
+    opportunities = df[df['AI_Score'] >= dynamic_threshold].copy()
 
     if opportunities.empty:
-        print("❌ Geen kansen gevonden met deze threshold. Is het model wel getraind?")
+        print(f"❌ Geen kansen gevonden met threshold {dynamic_threshold:.5f}.")
         exit()
 
-    print(f"3. Analyse over {len(opportunities)} potentiële instapmomenten (Score > {threshold})")
+    print(f"3. Analyse over {len(opportunities)} potentiële instapmomenten (Score > {dynamic_threshold:.5f})")
 
     # ==============================================================================
     # 4. MAE BEREKENEN (De "Pijn" meting)
@@ -148,22 +154,20 @@ try:
     print(res_df[['Indicator', 'Impact_Pips', 'Filter_Type', 'Median']].head(10).to_string(index=False))
 
     # ==============================================================================
-    # 7. EXPORT NAAR CONFIG (NU MET ID)
+    # 7. EXPORT NAAR CONFIG (NU MET ID EN THRESHOLD)
     # ==============================================================================
     if not res_df.empty:
         best_row = res_df.iloc[0] # De winnaar
         best_name = best_row['Indicator']
 
-        # --- NIEUW: Zoek het ID op in de geladen stats ---
+        # Zoek het ID op
         best_id = -1
         if 'ID' in stats_df.columns:
             try:
-                # Omdat 'Name' de index is, kunnen we direct .loc gebruiken
                 best_id = int(stats_df.loc[best_name, 'ID'])
             except:
                 best_id = -1
-        # ------------------------------------------------
-
+     
         print("\n--- ADVIES ---")
         print(f"De beste filter is: {best_name} (ID: {best_id})")
         
@@ -177,7 +181,7 @@ try:
         with open(config_file, 'w') as f:
             f.write("Key;Value\n")
             f.write(f"Filter_Name;{best_name}\n")
-            f.write(f"Filter_ID;{best_id}\n")     # <--- TOEGEVOEGD
+            f.write(f"Filter_ID;{best_id}\n")
             f.write(f"Filter_Mode;{best_row['Filter_Type']}\n")
             f.write(f"Filter_Level;{best_row['Median']}\n")
             

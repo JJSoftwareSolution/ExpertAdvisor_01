@@ -1,6 +1,5 @@
 Key;Value
-Trigger_Threshold;4.467111
-Filter_Name;None
-Filter_ID;-1
-Filter_Mode;OFF
-Filter_Level;0.0
+Filter_Name;Volatility-M30
+Filter_ID;112
+Filter_Mode;MAX
+Filter_Level;0.00167
