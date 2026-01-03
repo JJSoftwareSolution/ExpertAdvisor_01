@@ -1,0 +1,326 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from datetime import timedelta
+import warnings
+import sys
+
+# Onderdruk warnings voor schone output
+warnings.filterwarnings('ignore')
+
+# ==============================================================================
+# CONFIGURATIE & CONSTANTEN
+# ==============================================================================
+class Config:
+    # Paden (pas aan indien nodig)
+    PATH_DATA = "C:/MT4/MQL4/Files/TrainingData_Raw_EURUSD.csv"
+    PATH_STATS = "C:/MT4/MQL4/Files/Indicator_Stats_EURUSD.csv"
+    PATH_OUTPUT = "C:/MT4/tester/files/JJ_Daily_Plan.csv"
+    
+    # Split Date
+    TRAIN_END_DATE = '2022-12-31'
+    TEST_START_DATE = '2023-01-01'
+    
+    # Model Settings
+    MIN_CONFIDENCE = 0.65       # Alleen trades met >65% model confidence
+    MIN_VOTES = 2               # Minimaal 2 indicatoren in consensus (Cluster Logic)
+    
+    # Risk Management
+    MAX_TRADES_DAILY = 2        # Max trades per dag
+    MIN_HOURS_BETWEEN = 4       # Minimaal 4 uur tussen trades
+    MIN_ADX = 20.0              # Family 4 Filter: Geen trades in dode markt
+    
+    # Target Mapping
+    TARGET_BUY = 1
+    TARGET_SELL = 2
+
+# ==============================================================================
+# KLASSE: SYSTEM CORE
+# ==============================================================================
+class EuroDollarSystem:
+    def __init__(self):
+        self.df = None
+        self.stats = None
+        self.model = None
+        self.scaler = StandardScaler()
+        self.feature_meta = {} # Opslag voor richting en familie per kolom
+        
+    def load_data(self):
+        print(">> 1. Data Laden & Structureren...")
+        try:
+            # Laad metadata
+            self.stats = pd.read_csv(Config.PATH_STATS, sep=';')
+            # Maak map van Name -> Family
+            self.fam_map = dict(zip(self.stats['Name'], self.stats['Family']))
+            
+            # Laad trainingsdata
+            self.df = pd.read_csv(Config.PATH_DATA, sep=';').dropna(axis=1, how='all')
+            self.df['Time'] = pd.to_datetime(self.df['Time'])
+            
+            # Filter kolommen die we niet hebben in metadata (veiligheid)
+            valid_cols = [c for c in self.df.columns if c in self.fam_map or c in ['Time', 'Target']]
+            self.df = self.df[valid_cols]
+            
+            print(f"   - Rows: {len(self.df)}")
+            print(f"   - Features: {len(valid_cols)-2}")
+            
+        except FileNotFoundError as e:
+            print(f"❌ FOUT: Bestand niet gevonden. {e}")
+            sys.exit(1)
+
+    def analyze_market_structure(self):
+        print(">> 2. Markt Structuur Analyse (Correctie Richting)...")
+        # Dit lost het probleem op dat 'hoge RSI' soms Sell betekent in de data
+        # We berekenen de correlatie van elke indicator met de Target
+        
+        # Maak tijdelijke target: 1=Buy, -1=Sell
+        temp_target = self.df['Target'].copy()
+        temp_target = temp_target.replace(Config.TARGET_SELL, -1)
+        
+        feature_cols = [c for c in self.df.columns if c not in ['Time', 'Target']]
+        
+        for col in feature_cols:
+            # Correlatie berekenen
+            corr = self.df[col].corr(temp_target)
+            direction = 1 if corr >= 0 else -1
+            
+            family = self.fam_map.get(col, -1)
+            
+            self.feature_meta[col] = {
+                'direction': direction, # 1 = Positieve correlatie, -1 = Negatieve (Inverse)
+                'family': family,
+                'weight': abs(corr) * 10 # Ruwe 'kracht' score
+            }
+
+    def train_ensemble_model(self):
+        print(">> 3. Training Ensemble Model (2020-2022)...")
+        
+        # Split Data
+        train_mask = self.df['Time'] <= Config.TRAIN_END_DATE
+        train_df = self.df[train_mask]
+        
+        X = train_df.drop(['Time', 'Target'], axis=1)
+        y = train_df['Target']
+        
+        # We trainen alleen op rijen waar Target != 0 (Actie)
+        active_mask = y != 0
+        X_train = X[active_mask]
+        y_train = y[active_mask]
+        
+        # Schaal de data
+        self.scaler.fit(X_train)
+        X_scaled = self.scaler.transform(X_train)
+        
+        # ENSEMBLE: Random Forest + Gradient Boosting
+        # Dit zorgt voor minder overfitting dan 1 enkel model
+        rf = RandomForestClassifier(n_estimators=100, max_depth=7, random_state=42, n_jobs=-1)
+        gb = GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
+        
+        self.model = VotingClassifier(estimators=[('rf', rf), ('gb', gb)], voting='soft')
+        self.model.fit(X_scaled, y_train)
+        
+        print("   - Model getraind. Klaar voor validatie op 2023 data.")
+
+    def run_daily_workflow(self):
+        print(f">> 4. Uitvoeren Dagelijkse Workflow (High Performance Mode)...")
+        
+        # Test Data Selecteren
+        test_mask = self.df['Time'] >= Config.TEST_START_DATE
+        test_df = self.df[test_mask].copy().reset_index(drop=True)
+        
+        # Features schalen (in één keer)
+        X_test = test_df.drop(['Time', 'Target'], axis=1)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        print("   - A. Model voorspellingen berekenen...")
+        probs = self.model.predict_proba(X_test_scaled)
+        
+        # ---------------------------------------------------------
+        # STAP A: VECTORISATIE (Reken alles vooraf uit)
+        # ---------------------------------------------------------
+        print("   - B. Indicatoren consensus berekenen (Vectorized)...")
+        
+        # 1. Signalen uit Model
+        # We maken kolommen met True/False voor Buy en Sell signalen
+        buy_signal_mask = probs[:, 0] > Config.MIN_CONFIDENCE
+        sell_signal_mask = probs[:, 1] > Config.MIN_CONFIDENCE
+        
+        # 2. ADX Filter (Family 4)
+        # Zoek de ADX kolom
+        adx_col = [c for c in X_test.columns if 'ADX' in c and 'M30' in c][0]
+        adx_ok_mask = X_test[adx_col] >= Config.MIN_ADX
+        
+        # 3. Consensus Scores Berekenen (Zonder loop over rijen!)
+        # We bouwen een 'Buy_Score' en 'Sell_Score' voor elke rij
+        buy_votes = np.zeros(len(test_df))
+        sell_votes = np.zeros(len(test_df))
+        
+        # Haal kolommen op
+        m30_cols = [c for c in X_test.columns if 'M30' in c and self.feature_meta[c]['family'] in [0, 1]]
+        h4_cols = [c for c in X_test.columns if 'H4' in c and self.feature_meta[c]['family'] == 1]
+        
+        # Loop door de KOLOMMEN (100x) ipv RIJEN (100.000x) -> Dit is 1000x sneller
+        for col in m30_cols + h4_cols:
+            vals = X_test[col].values
+            direction = self.feature_meta[col]['direction']
+            
+            # Als direction 1 is: Positieve waarde = BUY
+            # Als direction -1 is: Negatieve waarde = BUY
+            if direction == 1:
+                is_buy = vals > 0
+                is_sell = vals < 0
+            else:
+                is_buy = vals < 0
+                is_sell = vals > 0
+            
+            buy_votes += is_buy.astype(int)
+            sell_votes += is_sell.astype(int)
+
+        # 4. H4 Filter (Specifieke check)
+        h4_buy_ok = np.zeros(len(test_df), dtype=bool)
+        h4_sell_ok = np.zeros(len(test_df), dtype=bool)
+        
+        for col in h4_cols:
+             vals = X_test[col].values
+             direction = self.feature_meta[col]['direction']
+             # Logica: Als signaal BUY is, moet H4 trend BUY zijn (of neutraal, maar niet SELL)
+             # Hier eisen we dat er minimaal 1 H4 indicator mee eens is
+             if direction == 1:
+                 h4_buy_ok |= (vals > 0)
+                 h4_sell_ok |= (vals < 0)
+             else:
+                 h4_buy_ok |= (vals < 0)
+                 h4_sell_ok |= (vals > 0)
+
+        # ---------------------------------------------------------
+        # STAP B: KANDIDATEN SELECTIE
+        # ---------------------------------------------------------
+        print("   - C. Kandidaten filteren...")
+        
+        # Combineer alle voorwaarden in één masker
+        # Kandidaat BUY = (Model Buy) EN (ADX OK) EN (Genoeg Votes) EN (H4 Trend OK)
+        final_buy_candidates = (
+            buy_signal_mask & 
+            adx_ok_mask & 
+            (buy_votes >= Config.MIN_VOTES) & 
+            h4_buy_ok
+        )
+        
+        final_sell_candidates = (
+            sell_signal_mask & 
+            adx_ok_mask & 
+            (sell_votes >= Config.MIN_VOTES) & 
+            h4_sell_ok
+        )
+        
+        # Voeg samen en pak de indexen
+        candidates_idx = np.where(final_buy_candidates | final_sell_candidates)[0]
+        
+        print(f"   - {len(candidates_idx)} potentiële setups gevonden. Nu tijd-filters toepassen...")
+
+        # ---------------------------------------------------------
+        # STAP C: TIJD MANAGEMENT (De enige loop die overblijft)
+        # ---------------------------------------------------------
+        results = []
+        last_trade_time = pd.Timestamp("2000-01-01") # Veilige startdatum
+        trades_today = 0
+        current_day = None
+        
+        # We loopen nu alleen over de kandidaten (bv. 500 rijen ipv 100.000)
+        for i in candidates_idx:
+            timestamp = test_df.at[i, 'Time']
+            
+            # Dag reset
+            if current_day != timestamp.date():
+                current_day = timestamp.date()
+                trades_today = 0
+                
+            # Max trades check
+            if trades_today >= Config.MAX_TRADES_DAILY: continue
+            
+            # Rusttijd check
+            if (timestamp - last_trade_time) < timedelta(hours=Config.MIN_HOURS_BETWEEN): continue
+            
+            # --- TRADE ACCEPTED ---
+            # Bepaal richting
+            if final_buy_candidates[i]:
+                entry_type = "BUY"
+                confidence = probs[i][0]
+            else:
+                entry_type = "SELL"
+                confidence = probs[i][1]
+            
+            # ATR ophalen
+            atr_col = [c for c in X_test.columns if 'ATR-M30' in c][0]
+            atr_val = test_df.at[i, atr_col]
+            
+            sl_pips = atr_val * 1.0
+            tp_pips = atr_val * 1.5
+            
+            # Reden opbouwen (Cluster info) - Dit doen we alleen voor de final trades
+            row = test_df.iloc[i]
+            reasons = []
+            
+            # Snel de redenen ophalen voor display
+            check_cols = m30_cols
+            for c in check_cols:
+                val = row[c]
+                direction = self.feature_meta[c]['direction']
+                is_agree = False
+                if entry_type == "BUY":
+                    is_agree = (val > 0) if direction == 1 else (val < 0)
+                else:
+                    is_agree = (val < 0) if direction == 1 else (val > 0)
+                
+                if is_agree: reasons.append(c.split('-')[0])
+
+            reason_str = "+".join(list(set(reasons))[:3])
+            
+            results.append({
+                'Time': timestamp,
+                'Direction': entry_type,
+                'Confidence': round(confidence, 2),
+                'Cluster': reason_str,
+                'ATR_M30': round(atr_val, 5),
+                'SL_Dist': round(sl_pips, 5),
+                'TP_Dist': round(tp_pips, 5),
+                'M5_Refine': "Check M5"
+            })
+            
+            # Update state
+            last_trade_time = timestamp
+            trades_today += 1
+            
+        return pd.DataFrame(results)
+
+    def save_results(self, df_results):
+        if df_results.empty:
+            print("⚠️ Geen trades gevonden die aan de strenge eisen voldoen.")
+        else:
+            print(f">> 5. Resultaten Opslaan: {len(df_results)} setups gevonden.")
+            print(df_results.head(10).to_string(index=False))
+            df_results.to_csv(Config.PATH_OUTPUT, sep=';', index=False)
+            print(f"✅ Opgeslagen in: {Config.PATH_OUTPUT}")
+
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
+if __name__ == "__main__":
+    system = EuroDollarSystem()
+    
+    # 1. Load
+    system.load_data()
+    
+    # 2. Analyze (Correct Direction)
+    system.analyze_market_structure()
+    
+    # 3. Train (2020-2022)
+    system.train_ensemble_model()
+    
+    # 4. Predict & Filter (2023)
+    trade_plan = system.run_daily_workflow()
+    
+    # 5. Export
+    system.save_results(trade_plan)
