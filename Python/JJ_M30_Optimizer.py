@@ -20,8 +20,8 @@ class Config:
     PATH_OUTPUT = "C:/MT4/tester/files/JJ_Daily_Plan.csv"
     
     # Split Date
-    TRAIN_END_DATE = '2022-12-31'
-    TEST_START_DATE = '2023-01-01'
+    TRAIN_END_DATE = '2023-12-31'
+    TEST_START_DATE = '2024-01-01'
     
     # Model Settings
     MIN_CONFIDENCE = 0.65       # Alleen trades met >65% model confidence
@@ -71,31 +71,39 @@ class EuroDollarSystem:
             sys.exit(1)
 
     def analyze_market_structure(self):
-        print(">> 2. Markt Structuur Analyse (Correctie Richting)...")
-        # Dit lost het probleem op dat 'hoge RSI' soms Sell betekent in de data
-        # We berekenen de correlatie van elke indicator met de Target
+        print(">> 2. Markt Structuur Analyse (Correctie Richting - STRICT)...")
         
-        # Maak tijdelijke target: 1=Buy, -1=Sell
-        temp_target = self.df['Target'].copy()
+        # STAP 1: Filter EERST op trainingsdata!
+        # We mogen alleen kijken naar data tot en met 2023
+        train_mask = self.df['Time'] <= Config.TRAIN_END_DATE
+        train_df = self.df[train_mask]
+        
+        # Maak tijdelijke target alleen voor de trainingsset
+        temp_target = train_df['Target'].copy()
         temp_target = temp_target.replace(Config.TARGET_SELL, -1)
         
         feature_cols = [c for c in self.df.columns if c not in ['Time', 'Target']]
         
+        print(f"   - Analyse gebaseerd op {len(train_df)} rijen t/m {Config.TRAIN_END_DATE}")
+        
         for col in feature_cols:
-            # Correlatie berekenen
-            corr = self.df[col].corr(temp_target)
-            direction = 1 if corr >= 0 else -1
+            # Correlatie berekenen op ALLEEN trainingsdata
+            corr = train_df[col].corr(temp_target)
             
+            # Als er geen correlatie is (bv constante 0), zet op 0
+            if pd.isna(corr): corr = 0
+            
+            direction = 1 if corr >= 0 else -1
             family = self.fam_map.get(col, -1)
             
             self.feature_meta[col] = {
-                'direction': direction, # 1 = Positieve correlatie, -1 = Negatieve (Inverse)
+                'direction': direction,
                 'family': family,
-                'weight': abs(corr) * 10 # Ruwe 'kracht' score
+                'weight': abs(corr) * 10 
             }
 
     def train_ensemble_model(self):
-        print(">> 3. Training Ensemble Model (2020-2022)...")
+        print(">> 3. Training Ensemble Model...")
         
         # Split Data
         train_mask = self.df['Time'] <= Config.TRAIN_END_DATE
@@ -103,6 +111,8 @@ class EuroDollarSystem:
         
         X = train_df.drop(['Time', 'Target'], axis=1)
         y = train_df['Target']
+        
+        self.feature_names = X.columns.tolist()
         
         # We trainen alleen op rijen waar Target != 0 (Actie)
         active_mask = y != 0
@@ -121,7 +131,56 @@ class EuroDollarSystem:
         self.model = VotingClassifier(estimators=[('rf', rf), ('gb', gb)], voting='soft')
         self.model.fit(X_scaled, y_train)
         
-        print("   - Model getraind. Klaar voor validatie op 2023 data.")
+        print(f"   - Model getraind. Klaar voor validatie vanaf {Config.TEST_START_DATE}.")
+
+
+
+    # ==============================================================================
+    # NIEUWE FUNCTIE: TOON NUTTELOZE INDICATOREN
+    # ==============================================================================
+    def analyze_feature_importance(self):
+        print("\n>> 3a. Feature Importance Analyse...")
+        
+        # Haal de getrainde sub-modellen op uit de VotingClassifier
+        # index 0 = RandomForest, index 1 = GradientBoosting
+        rf_model = self.model.estimators_[0]
+        gb_model = self.model.estimators_[1]
+        
+        # Haal de scores op
+        rf_imp = rf_model.feature_importances_
+        gb_imp = gb_model.feature_importances_
+        
+        # Bereken het gemiddelde belang
+        avg_imp = (rf_imp + gb_imp) / 2
+        
+        # Maak een dataframe voor overzicht
+        imp_df = pd.DataFrame({
+            'Feature': self.feature_names,
+            'Importance': avg_imp
+        }).sort_values(by='Importance', ascending=False)
+        
+        # Filter 1: Indicatoren met EXACT 0.0 invloed (kunnen direct weg)
+        zero_impact = imp_df[imp_df['Importance'] == 0.0]
+        
+        # Filter 2: Indicatoren met verwaarloosbare invloed (< 0.1%)
+        low_impact = imp_df[(imp_df['Importance'] > 0.0) & (imp_df['Importance'] < 0.001)]
+        
+        print(f"   - Totaal aantal features: {len(self.feature_names)}")
+        print(f"   - 🗑️ Features met 0.0% invloed (KAN JE VERWIJDEREN): {len(zero_impact)}")
+        
+        if not zero_impact.empty:
+            print("\n   ⚠️  DEZE INDICATOREN HEBBEN GEEN ENKEL EFFECT:")
+            print(zero_impact['Feature'].to_string(index=False))
+            
+        print(f"\n   - 📉 Features met zeer lage invloed (< 0.1%): {len(low_impact)}")
+        if not low_impact.empty:
+            print("   (Overweeg deze ook te verwijderen voor een schoner model)")
+            print(low_impact[['Feature', 'Importance']].head(10).to_string(index=False))
+            
+        print("\n   - 🏆 Top 5 Belangrijkste features:")
+        print(imp_df.head(5).to_string(index=False))
+        print("-" * 50 + "\n")
+
 
     def run_daily_workflow(self):
         print(f">> 4. Uitvoeren Dagelijkse Workflow (High Performance Mode)...")
@@ -129,6 +188,14 @@ class EuroDollarSystem:
         # Test Data Selecteren
         test_mask = self.df['Time'] >= Config.TEST_START_DATE
         test_df = self.df[test_mask].copy().reset_index(drop=True)
+        
+        # --- VEILIGHEIDSCHECK VOOR LEGE DATA ---
+        if test_df.empty:
+            print(f"\n❌ KRITISCHE FOUT: Geen data gevonden vanaf {Config.TEST_START_DATE}!")
+            print(f"   De laatste datum in je CSV is: {self.df['Time'].max()}")
+            print("   👉 OPLOSSING: Draai je MT4 'JJ_DataCollector' script opnieuw met een datum in de toekomst (bv 2026) en COMPILEER het script eerst!\n")
+            sys.exit(1)
+        # ---------------------------------------
         
         # Features schalen (in één keer)
         X_test = test_df.drop(['Time', 'Target'], axis=1)
@@ -316,10 +383,14 @@ if __name__ == "__main__":
     # 2. Analyze (Correct Direction)
     system.analyze_market_structure()
     
-    # 3. Train (2020-2022)
+    # 3. Train
     system.train_ensemble_model()
     
-    # 4. Predict & Filter (2023)
+    # --- NIEUW: Bekijk welke indicatoren weg kunnen ---
+    system.analyze_feature_importance()
+    # --------------------------------------------------
+    
+    # 4. Predict & Filter
     trade_plan = system.run_daily_workflow()
     
     # 5. Export
