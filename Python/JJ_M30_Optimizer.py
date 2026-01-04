@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-from sklearn.model_selection import train_test_split
+#from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from datetime import timedelta
+from datetime import datetime, timedelta
 import warnings
 import sys
 
@@ -17,18 +17,22 @@ class Config:
     # Paden (pas aan indien nodig)
     PATH_DATA = "C:/MT4/MQL4/Files/TrainingData_Raw_EURUSD.csv"
     PATH_STATS = "C:/MT4/MQL4/Files/Indicator_Stats_EURUSD.csv"
-    PATH_OUTPUT = "C:/MT4/tester/files/JJ_Daily_Plan.csv"
     
-    # Split Date
-    TRAIN_END_DATE = '2023-12-31'
-    TEST_START_DATE = '2024-01-01'
+    # SETUP voor DEMO-account
+#    PATH_OUTPUT = "C:/MT4/tester/files/JJ_Daily_Plan.csv"
+#    TRAIN_END_DATE = '2022-12-31'
+#    TEST_START_DATE = '2023-01-01'
+    # SETUP voor LIVE-account
+    PATH_OUTPUT = "C:/MT4/MQL4/files/JJ_Daily_Plan.csv"
+    TRAIN_END_DATE = '2025-12-31'
+    TEST_START_DATE = datetime.now().strftime('%Y-%m-%d')
     
     # Model Settings
     MIN_CONFIDENCE = 0.65       # Alleen trades met >65% model confidence
     MIN_VOTES = 2               # Minimaal 2 indicatoren in consensus (Cluster Logic)
     
     # Risk Management
-    MAX_TRADES_DAILY = 2        # Max trades per dag
+    MAX_TRADES_DAILY = 2        # Max 2 trades per dag
     MIN_HOURS_BETWEEN = 4       # Minimaal 4 uur tussen trades
     MIN_ADX = 20.0              # Family 4 Filter: Geen trades in dode markt
     
@@ -184,9 +188,23 @@ class EuroDollarSystem:
 
     def run_daily_workflow(self):
         print(f">> 4. Uitvoeren Dagelijkse Workflow (High Performance Mode)...")
+
+        # Als TEST_START_DATE in het verleden ligt (vóór vandaag), gebruiken we die datum.
+        # Als het vandaag is, gebruiken we de 'laatste 7 dagen' logica voor het weekend of als beurs meerdere dagen was gesloten.
+        
+        target_start = pd.to_datetime(Config.TEST_START_DATE)
+        today = pd.Timestamp(datetime.now().date())
+
+        if target_start < today:
+            # Mode: Backtest / Testset maken
+            start_time = target_start
+        else:
+            # Mode: Live Trading (weekend proof)
+            last_date_in_data = self.df['Time'].max()
+            start_time = last_date_in_data - timedelta(days=7)
         
         # Test Data Selecteren
-        test_mask = self.df['Time'] >= Config.TEST_START_DATE
+        test_mask = self.df['Time'] >= start_time
         test_df = self.df[test_mask].copy().reset_index(drop=True)
         
         # --- VEILIGHEIDSCHECK VOOR LEGE DATA ---
@@ -250,16 +268,16 @@ class EuroDollarSystem:
         h4_sell_ok = np.zeros(len(test_df), dtype=bool)
         
         for col in h4_cols:
-             vals = X_test[col].values
-             direction = self.feature_meta[col]['direction']
-             # Logica: Als signaal BUY is, moet H4 trend BUY zijn (of neutraal, maar niet SELL)
-             # Hier eisen we dat er minimaal 1 H4 indicator mee eens is
-             if direction == 1:
-                 h4_buy_ok |= (vals > 0)
-                 h4_sell_ok |= (vals < 0)
-             else:
-                 h4_buy_ok |= (vals < 0)
-                 h4_sell_ok |= (vals > 0)
+            vals = X_test[col].values
+            direction = self.feature_meta[col]['direction']
+            # Logica: Als signaal BUY is, moet H4 trend BUY zijn (of neutraal, maar niet SELL)
+            # Hier eisen we dat er minimaal 1 H4 indicator mee eens is
+            if direction == 1:
+                h4_buy_ok |= (vals > 0)
+                h4_sell_ok |= (vals < 0)
+            else:
+                h4_buy_ok |= (vals < 0)
+                h4_sell_ok |= (vals > 0)
 
         # ---------------------------------------------------------
         # STAP B: KANDIDATEN SELECTIE
@@ -375,6 +393,15 @@ class EuroDollarSystem:
 # MAIN EXECUTION
 # ==============================================================================
 if __name__ == "__main__":
+    # --- CHECK TRAIN_END_DATE ---
+    train_date = datetime.strptime(Config.TRAIN_END_DATE, '%Y-%m-%d')
+    drie_maanden_geleden = datetime.now() - timedelta(days=90)
+
+    if train_date < drie_maanden_geleden:
+        print(f"\n!!! LET OP: De trainingsdata (t/m {Config.TRAIN_END_DATE}) is meer dan 3 maanden oud.")
+        print("   Overweeg om de TRAIN_END_DATE bij te werken voor een recenter model.\n")
+    # ----------------------------
+    
     system = EuroDollarSystem()
     
     # 1. Load
